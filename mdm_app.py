@@ -138,9 +138,46 @@ Use ONLY these types:
 Be precise. Infer from both the column name AND sample values."""
 
     result = gemini_json(prompt, max_tokens=800)
-    if isinstance(result, dict):
-        return result.get("id_column",""), result.get("col_map",{})
-    return "", {}
+    if isinstance(result, dict) and result:
+        id_col  = result.get("id_column", "") or list(df.columns)[0]
+        col_map = result.get("col_map", {})
+        if col_map:
+            return id_col, col_map
+    # Fallback: auto-detect from column names if Gemini fails
+    col_map = {}
+    id_col  = list(df.columns)[0]
+    for col in df.columns:
+        c = col.upper()
+        if any(x in c for x in ["_ID","ID_","CID","CUSTOMER_ID","CUST_ID"]) and col == list(df.columns)[0]:
+            col_map[col] = "id"
+        elif "FIRST" in c and "NAME" in c:
+            col_map[col] = "firstname"
+        elif "LAST" in c and "NAME" in c:
+            col_map[col] = "lastname"
+        elif "FULL" in c and "NAME" in c:
+            col_map[col] = "fullname"
+        elif "EMAIL" in c or "MAIL" in c:
+            col_map[col] = "email"
+        elif any(x in c for x in ["PHONE","MOBILE","CONTACT","MOB"]):
+            col_map[col] = "phone"
+        elif any(x in c for x in ["DOB","BIRTH","DATE_OF"]):
+            col_map[col] = "dob"
+        elif "GENDER" in c or "SEX" in c:
+            col_map[col] = "gender"
+        elif any(x in c for x in ["ADDR","ADDRESS","STREET"]):
+            col_map[col] = "address"
+        elif "CITY" in c or "TOWN" in c:
+            col_map[col] = "city"
+        elif "IP" in c or "IP_ADDR" in c:
+            col_map[col] = "ip"
+        elif any(x in c for x in ["CIF","ACCOUNT","ACC_NO","ACCT"]):
+            col_map[col] = "numeric_id"
+        elif any(x in c for x in ["_ID","ID"]):
+            col_map[col] = "id"
+            if not id_col: id_col = col
+        else:
+            col_map[col] = "other"
+    return id_col, col_map
 
 # ══════════════════════════════════════════════════════════════════════
 # NORMALISATION — purely Python, no AI
@@ -206,11 +243,15 @@ def build_candidate_pairs(records, col_map):
             if len(nv) >= 8:
                 blocks[f"phone::{nv}"].add(i)
 
-        # Numeric ID block (CIF etc)
+        # Numeric ID block (CIF etc) — normalize e.g. CIF9001 -> 9001
         for v in get_col(rec, col_map, "numeric_id"):
             nv = str(v or "").strip()
             if nv and nv not in ("","None","nan"):
                 blocks[f"cif::{nv}"].add(i)
+                # also index digits-only version for mixed formats
+                digits_only = re.sub(r"[^0-9]", "", nv)
+                if digits_only and digits_only != nv:
+                    blocks[f"cif::{digits_only}"].add(i)
 
         # Last name block (weak anchor — needs score to confirm)
         for v in get_col(rec, col_map, "lastname"):
@@ -258,7 +299,9 @@ def score_pair(rec_a, rec_b, col_map):
     # ── Numeric ID / CIF (definitive) ─────────────────────────────
     for v in get_col(rec_a, col_map, "numeric_id"):
         for u in get_col(rec_b, col_map, "numeric_id"):
-            if str(v).strip() == str(u).strip() and str(v).strip() not in ("","None","nan"):
+            nv = str(v or "").strip(); nu = str(u or "").strip()
+            dv = re.sub(r"[^0-9]","",nv); du = re.sub(r"[^0-9]","",nu)
+            if nv and nu and nv not in ("None","nan") and (nv==nu or (dv and du and dv==du)):
                 score += 30
                 signals.append("✅ Same CIF/ID (+30)")
 
