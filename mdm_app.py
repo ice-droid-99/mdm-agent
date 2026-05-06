@@ -1,7 +1,7 @@
 import streamlit as st
 import snowflake.connector
 import pandas as pd
-import anthropic
+import google.generativeai as genai
 import json
 import re
 import uuid
@@ -51,7 +51,7 @@ DEFAULTS = {
     "candidates":[],
     "analysis_done":False,
     "decisions":{},
-    "anthropic_key":"",
+    "gemini_key":"",
 }
 for k,v in DEFAULTS.items():
     if k not in st.session_state:
@@ -81,21 +81,20 @@ def get_count():
     r = sf_query(f'SELECT COUNT(*) AS C FROM "{db}"."{sc}"."{tb}"')
     return int(r["C"].iloc[0])
 
-def claude(prompt, max_tokens=1000):
-    """Call Claude and return text response."""
-    client = anthropic.Anthropic(api_key=st.session_state.anthropic_key)
-    resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=max_tokens,
-        messages=[{"role":"user","content":prompt}]
+def gemini(prompt, max_tokens=1000):
+    """Call Gemini and return text response."""
+    genai.configure(api_key=st.session_state.gemini_key)
+    model = genai.GenerativeModel(
+        model_name="gemini-2.0-flash",
+        generation_config=genai.GenerationConfig(max_output_tokens=max_tokens)
     )
-    return resp.content[0].text.strip()
+    resp = model.generate_content(prompt)
+    return resp.text.strip()
 
 def claude_json(prompt, max_tokens=1500):
-    """Call Claude, expect JSON back."""
-    text = claude(prompt, max_tokens)
+    """Call Gemini, expect JSON back."""
+    text = gemini(prompt, max_tokens)
     text = re.sub(r"```json|```","",text).strip()
-    # extract first {...} or [...]
     m = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
     if m:
         return json.loads(m.group(1))
@@ -293,7 +292,7 @@ def page_login():
         account  = st.text_input("Snowflake Account",  placeholder="xy12345.us-east-1")
         username = st.text_input("Username",            placeholder="your_username")
         password = st.text_input("Password", type="password", placeholder="••••••••")
-        api_key  = st.text_input("Anthropic API Key",  type="password", placeholder="sk-ant-...")
+        api_key  = st.text_input("Gemini API Key",  type="password", placeholder="AIza...")
         st.markdown("<br>", unsafe_allow_html=True)
 
         if st.button("Connect & Start →"):
@@ -308,7 +307,7 @@ def page_login():
                         st.session_state.sf_conn       = conn
                         st.session_state.sf_account    = account.strip()
                         st.session_state.sf_user       = username.strip()
-                        st.session_state.anthropic_key = api_key.strip()
+                        st.session_state.gemini_key = api_key.strip()
                         cur = conn.cursor()
                         cur.execute("SHOW WAREHOUSES")
                         st.session_state.warehouses = [r[0] for r in cur.fetchall()]
