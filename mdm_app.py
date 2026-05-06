@@ -85,7 +85,7 @@ def claude(prompt, max_tokens=1000):
     """Call Claude and return text response."""
     client = anthropic.Anthropic(api_key=st.session_state.anthropic_key)
     resp = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-haiku-4-5-20251001",
         max_tokens=max_tokens,
         messages=[{"role":"user","content":prompt}]
     )
