@@ -82,7 +82,7 @@ def fetch_count():
 def gemini_call(prompt, max_tokens=3000):
     genai.configure(api_key=st.session_state.gemini_key)
     model = genai.GenerativeModel(
-        model_name="gemini-3.1-flash-lite",
+        model_name="gemini-3.1-flash",
         generation_config=genai.GenerationConfig(max_output_tokens=max_tokens, temperature=0.1)
     )
     return model.generate_content(prompt).text.strip()
