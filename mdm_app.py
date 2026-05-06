@@ -81,24 +81,40 @@ def get_count():
     r = sf_query(f'SELECT COUNT(*) AS C FROM "{db}"."{sc}"."{tb}"')
     return int(r["C"].iloc[0])
 
-def gemini(prompt, max_tokens=1000):
+def gemini(prompt, max_tokens=4000):
     """Call Gemini and return text response."""
     genai.configure(api_key=st.session_state.gemini_key)
     model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        generation_config=genai.GenerationConfig(max_output_tokens=max_tokens)
+        model_name="gemini-2.5-flash-preview-04-17",
+        generation_config=genai.GenerationConfig(
+            max_output_tokens=max_tokens,
+            temperature=0.1,
+        )
     )
     resp = model.generate_content(prompt)
     return resp.text.strip()
 
-def claude_json(prompt, max_tokens=1500):
-    """Call Gemini, expect JSON back."""
+def claude_json(prompt, max_tokens=4000):
+    """Call Gemini, expect JSON back, robust parsing."""
     text = gemini(prompt, max_tokens)
-    text = re.sub(r"```json|```","",text).strip()
-    m = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
-    if m:
-        return json.loads(m.group(1))
-    return json.loads(text)
+    text = re.sub(r"```json|```", "", text).strip()
+    try:
+        m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", text)
+        if m:
+            return json.loads(m.group(1))
+    except json.JSONDecodeError:
+        pass
+    try:
+        fixed = text
+        fixed += "]" * max(0, text.count("[") - text.count("]"))
+        fixed += "}" * max(0, text.count("{") - text.count("}"))
+        m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", fixed)
+        if m:
+            return json.loads(m.group(1))
+    except Exception:
+        pass
+    return {"id_column":"","column_types":{},"blocking_columns":[],"notes":"Parse error - please retry."}
+
 
 # ══════════════════════════════════════════════════════════════════════
 # STEP A — Claude understands the table
