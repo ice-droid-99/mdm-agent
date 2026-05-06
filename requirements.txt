@@ -1,5 +1,5 @@
 streamlit
 snowflake-connector-python
 pandas
-anthropic
+google-generativeai
 python-dateutil
