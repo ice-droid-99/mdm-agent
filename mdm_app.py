@@ -2,62 +2,57 @@ import streamlit as st
 import snowflake.connector
 import pandas as pd
 import google.generativeai as genai
-import json
-import re
-import uuid
+import json, re, uuid
 from datetime import datetime
-from itertools import combinations
 from collections import defaultdict
+from itertools import combinations
 
-# ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="MDM Agent", page_icon="❄️", layout="wide",
                    initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@600;700;800&display=swap');
-html,body,[data-testid="stAppViewContainer"]{background:#0a0d14 !important;}
-[data-testid="stAppViewContainer"]>.main{background:#0a0d14 !important;}
+html,body,[data-testid="stAppViewContainer"]{background:#07090f !important;}
+[data-testid="stAppViewContainer"]>.main{background:#07090f !important;}
 [data-testid="stHeader"]{background:transparent !important;}
 section[data-testid="stSidebar"]{display:none !important;}
 #MainMenu,footer{visibility:hidden;}
 *{font-family:'Syne',sans-serif;}
 code,pre,[data-testid="stTextInput"] input,[data-testid="stSelectbox"] *{font-family:'DM Mono',monospace !important;}
-[data-testid="stTextInput"] input{background:#111827 !important;border:1px solid #1f2937 !important;border-radius:8px !important;color:#f9fafb !important;font-size:13px !important;}
-[data-testid="stTextInput"] input:focus{border-color:#3b82f6 !important;box-shadow:0 0 0 3px rgba(59,130,246,0.15) !important;}
-[data-testid="stTextInput"] label,[data-testid="stSelectbox"] label{color:#6b7280 !important;font-family:'DM Mono',monospace !important;font-size:11px !important;text-transform:uppercase !important;letter-spacing:1.5px !important;}
-[data-testid="stSelectbox"]>div>div{background:#111827 !important;border:1px solid #1f2937 !important;border-radius:8px !important;color:#f9fafb !important;}
-[data-testid="stButton"]>button{background:linear-gradient(135deg,#3b82f6,#6366f1) !important;color:#fff !important;border:none !important;border-radius:8px !important;font-weight:700 !important;font-size:13px !important;width:100% !important;padding:12px !important;letter-spacing:0.5px !important;transition:opacity .2s,transform .1s !important;}
+[data-testid="stTextInput"] input{background:#0f1420 !important;border:1px solid #1e2535 !important;border-radius:8px !important;color:#e8eaf0 !important;font-size:13px !important;}
+[data-testid="stTextInput"] input:focus{border-color:#4f8ef7 !important;box-shadow:0 0 0 3px rgba(79,142,247,0.12) !important;}
+[data-testid="stTextInput"] label,[data-testid="stSelectbox"] label{color:#4b5680 !important;font-family:'DM Mono',monospace !important;font-size:11px !important;text-transform:uppercase !important;letter-spacing:1.5px !important;}
+[data-testid="stSelectbox"]>div>div{background:#0f1420 !important;border:1px solid #1e2535 !important;border-radius:8px !important;color:#e8eaf0 !important;}
+[data-testid="stButton"]>button{background:linear-gradient(135deg,#4f8ef7,#7c5ce8) !important;color:#fff !important;border:none !important;border-radius:8px !important;font-weight:700 !important;font-size:13px !important;width:100% !important;padding:12px !important;}
 [data-testid="stButton"]>button:hover{opacity:.88 !important;transform:translateY(-1px) !important;}
-[data-testid="stMetric"]{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:20px !important;}
-[data-testid="stMetricValue"]{color:#3b82f6 !important;font-size:26px !important;font-weight:800 !important;}
-[data-testid="stMetricLabel"]{color:#6b7280 !important;font-size:11px !important;}
-[data-testid="stDataFrame"]{border:1px solid #1f2937 !important;border-radius:10px !important;}
-hr{border-color:#1f2937 !important;}
-.stTabs [data-baseweb="tab-list"]{background:#111827;border-radius:10px;gap:4px;padding:4px;}
-.stTabs [data-baseweb="tab"]{border-radius:8px !important;color:#6b7280 !important;}
-.stTabs [aria-selected="true"]{background:#1f2937 !important;color:#f9fafb !important;}
+[data-testid="stMetric"]{background:#0f1420;border:1px solid #1e2535;border-radius:12px;padding:20px !important;}
+[data-testid="stMetricValue"]{color:#4f8ef7 !important;font-size:26px !important;font-weight:800 !important;}
+[data-testid="stMetricLabel"]{color:#4b5680 !important;font-size:11px !important;}
+[data-testid="stDataFrame"]{border:1px solid #1e2535 !important;border-radius:10px !important;}
+hr{border-color:#1e2535 !important;}
+.stTabs [data-baseweb="tab-list"]{background:#0f1420;border-radius:10px;gap:4px;padding:4px;}
+.stTabs [data-baseweb="tab"]{border-radius:8px !important;color:#4b5680 !important;}
+.stTabs [aria-selected="true"]{background:#1e2535 !important;color:#e8eaf0 !important;}
+[data-testid="stProgress"]>div>div{background:linear-gradient(90deg,#4f8ef7,#7c5ce8) !important;}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Session defaults ───────────────────────────────────────────────────────────
-DEFAULTS = {
+# ── Session state ──────────────────────────────────────────────────────────────
+for k, v in {
     "page":"login","sf_conn":None,"sf_account":"","sf_user":"",
     "warehouses":[],"databases":[],"schemas":[],"tables":[],
     "sel_db":None,"sel_schema":None,"sel_table":None,"sel_wh":None,
     "df":None,"total_rows":0,"current_page":1,"rows_per_page":50,
-    "table_schema":None,   # Claude's understanding of the table
-    "blocking_keys":None,  # Claude-defined blocking strategy
-    "candidates":[],
-    "analysis_done":False,
-    "decisions":{},
-    "gemini_key":"",
-}
-for k,v in DEFAULTS.items():
+    "col_map":None,"id_col":None,
+    "clusters":[],"analysis_done":False,"decisions":{},"gemini_key":"",
+}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── Snowflake ──────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# SNOWFLAKE HELPERS
+# ══════════════════════════════════════════════════════════════════════
 def sf_query(sql):
     cur = st.session_state.sf_conn.cursor()
     cur.execute(sql)
@@ -72,128 +67,165 @@ def sf_write(sql):
     st.session_state.sf_conn.commit()
     cur.close()
 
-def get_page(limit, offset):
+def fetch_page(limit, offset):
     db,sc,tb = st.session_state.sel_db,st.session_state.sel_schema,st.session_state.sel_table
     return sf_query(f'SELECT * FROM "{db}"."{sc}"."{tb}" LIMIT {limit} OFFSET {offset}')
 
-def get_count():
+def fetch_count():
     db,sc,tb = st.session_state.sel_db,st.session_state.sel_schema,st.session_state.sel_table
     r = sf_query(f'SELECT COUNT(*) AS C FROM "{db}"."{sc}"."{tb}"')
     return int(r["C"].iloc[0])
 
-def gemini(prompt, max_tokens=20000):
-    """Call Gemini and return text response."""
+# ══════════════════════════════════════════════════════════════════════
+# GEMINI HELPERS
+# ══════════════════════════════════════════════════════════════════════
+def gemini_call(prompt, max_tokens=3000):
     genai.configure(api_key=st.session_state.gemini_key)
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash",
-        generation_config=genai.GenerationConfig(
-            max_output_tokens=max_tokens,
-            temperature=0.1,
-        )
+        generation_config=genai.GenerationConfig(max_output_tokens=max_tokens, temperature=0.1)
     )
-    resp = model.generate_content(prompt)
-    return resp.text.strip()
+    return model.generate_content(prompt).text.strip()
 
-def claude_json(prompt, max_tokens=20000):
-    """Call Gemini, expect JSON back, robust parsing."""
-    text = gemini(prompt, max_tokens)
-    text = re.sub(r"```json|```", "", text).strip()
-    try:
-        m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", text)
-        if m:
-            return json.loads(m.group(1))
-    except json.JSONDecodeError:
-        pass
-    try:
-        fixed = text
-        fixed += "]" * max(0, text.count("[") - text.count("]"))
-        fixed += "}" * max(0, text.count("{") - text.count("}"))
-        m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", fixed)
-        if m:
-            return json.loads(m.group(1))
-    except Exception:
-        pass
-    return {"id_column":"","column_types":{},"blocking_columns":[],"notes":"Parse error - please retry."}
-
+def gemini_json(prompt, max_tokens=3000):
+    raw = gemini_call(prompt, max_tokens)
+    raw = re.sub(r"```json|```", "", raw).strip()
+    for pattern in [r"(\[[\s\S]*\])", r"(\{[\s\S]*\})"]:
+        try:
+            m = re.search(pattern, raw)
+            if m:
+                return json.loads(m.group(1))
+        except:
+            pass
+    return []
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP A — Claude understands the table
+# STEP 1 — GEMINI UNDERSTANDS TABLE STRUCTURE
+# Returns col_map: {col_name: type}
+# Types: id, firstname, lastname, email, phone, dob, address, city,
+#        ip, numeric_id, gender, other
 # ══════════════════════════════════════════════════════════════════════
-def claude_understand_table(df):
-    """
-    Give Claude column names + 5 sample rows.
-    Claude tells us: which columns are IDs, names, emails,
-    phones, dates, addresses, and what blocking groups to use.
-    Returns a dict with full schema understanding.
-    """
-    cols = list(df.columns)
-    sample = df.head(5).to_dict(orient="records")
+def understand_table(df):
+    sample = df.head(6).to_dict(orient="records")
+    prompt = f"""You are an MDM expert. Analyze this customer table.
 
-    prompt = f"""You are a master data management expert analyzing a customer table.
+Columns: {list(df.columns)}
+Sample data: {json.dumps(sample, default=str)}
 
-Column names: {cols}
-
-Sample rows (first 5):
-{json.dumps(sample, default=str, indent=2)}
-
-Your job is to understand this table's structure completely.
-
-Return ONLY a JSON object in this exact format:
+Return ONLY a JSON object like this:
 {{
-  "id_column": "<the primary key / unique ID column name>",
-  "column_types": {{
-    "<col_name>": "<type>"
-  }},
-  "blocking_columns": ["<col1>", "<col2>", ...],
-  "notes": "<any observations about data quality, mixed formats etc>"
+  "id_column": "<the unique ID column name>",
+  "col_map": {{
+    "<column_name>": "<type>"
+  }}
 }}
 
-For column_types, use these type labels:
-- "id" for primary keys / unique identifiers
-- "name" for any name fields (first, last, full, abbreviated)
-- "email" for email addresses
-- "phone" for phone/mobile/contact numbers
-- "date" for dates (DOB, registration date etc) — note if mixed formats
-- "address" for address, city, street, location fields
-- "gender" for gender/sex fields
-- "numeric_id" for CIF, account numbers, numeric codes
-- "ip" for IP addresses
-- "other" for anything else
+Use ONLY these types:
+- "id"         : unique row identifier
+- "firstname"  : first / given name
+- "lastname"   : last / family / surname
+- "fullname"   : combined full name
+- "email"      : email address
+- "phone"      : phone or mobile number
+- "dob"        : date of birth in any format
+- "address"    : street address
+- "city"       : city or town
+- "ip"         : IP address
+- "numeric_id" : CIF, account number, or any numeric identifier
+- "gender"     : gender or sex field
+- "other"      : anything else
 
-For blocking_columns: pick 3-5 columns that would be most useful to group records by for duplicate detection. These should be columns where two records sharing the same value is a strong signal they might be duplicates (email, phone, CIF, etc).
+Be precise. Infer from both the column name AND sample values."""
 
-Be smart — infer column meaning from the name AND the sample data, not just the column name."""
-
-    return claude_json(prompt, max_tokens=20000)
+    result = gemini_json(prompt, max_tokens=800)
+    if isinstance(result, dict):
+        return result.get("id_column",""), result.get("col_map",{})
+    return "", {}
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP B — Claude builds blocking groups
+# NORMALISATION — purely Python, no AI
 # ══════════════════════════════════════════════════════════════════════
-def build_candidate_pairs(all_records, schema_info):
-    """
-    Use Claude-identified blocking columns to group records.
-    Return candidate pairs (index_a, index_b) to score.
-    Python just does set grouping — no hardcoded logic.
-    """
-    blocking_cols = schema_info.get("blocking_columns", [])
-    id_col        = schema_info.get("id_column", all_records[0].keys().__iter__().__next__()
-                                    if all_records else "id")
+def n_email(v):
+    return str(v or "").strip().lower()
 
+def n_phone(v):
+    digits = re.sub(r"\D", "", str(v or ""))
+    return digits[-10:] if len(digits) >= 10 else digits
+
+def n_name(v):
+    # remove punctuation, lowercase, strip spaces
+    return re.sub(r"[^a-z]", "", str(v or "").lower())
+
+def n_dob(v):
+    v = str(v or "").strip()
+    if not v or v in ("None","nan","NULL",""): return ""
+    try:
+        from dateutil import parser as dp
+        if re.match(r"^\d{8}$", v):
+            for fmt in ["%Y%m%d", "%d%m%Y"]:
+                try: return datetime.strptime(v, fmt).strftime("%Y-%m-%d")
+                except: pass
+        return dp.parse(v, dayfirst=True).strftime("%Y-%m-%d")
+    except:
+        return v.lower()
+
+def n_addr(v):
+    return re.sub(r"[^a-z0-9]", "", str(v or "").lower())
+
+def n_ip(v):
+    return str(v or "").strip()
+
+def get_col(rec, col_map, typ):
+    """Get all values from record matching a given type."""
+    return [rec.get(col, "") for col, t in col_map.items() if t == typ]
+
+def first_val(lst):
+    return lst[0] if lst else ""
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 2 — BLOCKING
+# Only compare records that share at least one strong anchor:
+#   - same email
+#   - same phone (last 10 digits)
+#   - same numeric_id (CIF)
+#   - same lastname (normalized) — weak anchor, needs scoring to confirm
+# ══════════════════════════════════════════════════════════════════════
+def build_candidate_pairs(records, col_map):
     blocks = defaultdict(set)
 
-    for i, rec in enumerate(all_records):
-        for col in blocking_cols:
-            val = str(rec.get(col, "") or "").strip().lower()
-            if val and val not in ("none","null","nan",""):
-                # normalize minimally — just strip spaces and lowercase
-                # Claude will do the deep normalization during scoring
-                val_clean = re.sub(r"\s+","",val)
-                if len(val_clean) >= 3:
-                    blocks[f"{col}::{val_clean}"].add(i)
+    for i, rec in enumerate(records):
+        # Email block
+        for v in get_col(rec, col_map, "email"):
+            nv = n_email(v)
+            if nv and "@" in nv:
+                blocks[f"email::{nv}"].add(i)
+
+        # Phone block
+        for v in get_col(rec, col_map, "phone"):
+            nv = n_phone(v)
+            if len(nv) >= 8:
+                blocks[f"phone::{nv}"].add(i)
+
+        # Numeric ID block (CIF etc)
+        for v in get_col(rec, col_map, "numeric_id"):
+            nv = str(v or "").strip()
+            if nv and nv not in ("","None","nan"):
+                blocks[f"cif::{nv}"].add(i)
+
+        # Last name block (weak anchor — needs score to confirm)
+        for v in get_col(rec, col_map, "lastname"):
+            nv = n_name(v)
+            if len(nv) >= 3:
+                blocks[f"ln::{nv}"].add(i)
+
+        # Full name block
+        for v in get_col(rec, col_map, "fullname"):
+            nv = n_name(v)
+            if len(nv) >= 4:
+                blocks[f"fn::{nv}"].add(i)
 
     pairs = set()
     for grp in blocks.values():
-        grp = list(grp)
         if len(grp) < 2: continue
         for a, b in combinations(sorted(grp), 2):
             pairs.add((min(a,b), max(a,b)))
@@ -201,83 +233,340 @@ def build_candidate_pairs(all_records, schema_info):
     return list(pairs)
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP C — Claude scores each pair
+# STEP 3 — SIGNAL SCORING
+# After blocking brings records together, score the evidence
 # ══════════════════════════════════════════════════════════════════════
-def score_pairs_batch(pairs_data, schema_info):
-    """
-    Score ALL pairs in ONE Gemini call to save API quota.
-    pairs_data: list of {"pair_index": i, "rec_a": {...}, "rec_b": {...}}
-    Returns list of results in same order.
-    """
-    pairs_json = json.dumps(pairs_data, default=str, indent=2)
-    col_types  = json.dumps(schema_info.get("column_types", {}), indent=2)
+def score_pair(rec_a, rec_b, col_map):
+    score   = 0
+    signals = []
 
-    prompt = f"""You are a master data management expert.
+    # ── Email (strong proof alone) ─────────────────────────────────
+    for v in get_col(rec_a, col_map, "email"):
+        for u in get_col(rec_b, col_map, "email"):
+            if n_email(v) == n_email(u) and n_email(v):
+                score += 40
+                signals.append("✅ Same email (+40)")
 
-Table column types:
-{col_types}
+    # ── Phone (strong proof alone) ─────────────────────────────────
+    for v in get_col(rec_a, col_map, "phone"):
+        for u in get_col(rec_b, col_map, "phone"):
+            na, nb = n_phone(v), n_phone(u)
+            if na == nb and len(na) >= 8:
+                score += 35
+                signals.append("✅ Same phone (+35)")
 
-Score ALL of the following customer record pairs. For each pair decide if they are the SAME real person.
+    # ── Numeric ID / CIF (definitive) ─────────────────────────────
+    for v in get_col(rec_a, col_map, "numeric_id"):
+        for u in get_col(rec_b, col_map, "numeric_id"):
+            if str(v).strip() == str(u).strip() and str(v).strip() not in ("","None","nan"):
+                score += 30
+                signals.append("✅ Same CIF/ID (+30)")
 
-Pairs to score:
-{pairs_json}
+    # ── First + Last Name combo ────────────────────────────────────
+    fn_a = [n_name(v) for v in get_col(rec_a, col_map, "firstname")]
+    fn_b = [n_name(v) for v in get_col(rec_b, col_map, "firstname")]
+    ln_a = [n_name(v) for v in get_col(rec_a, col_map, "lastname")]
+    ln_b = [n_name(v) for v in get_col(rec_b, col_map, "lastname")]
 
-Rules for comparison:
-- Normalize before comparing:
-  * Dates: "15-03-1990", "1990-03-15", "15031990", "March 15 1990" = identical
-  * Names: "M. Ali", "Mohd Ali", "Mohammed Ali" = same person
-  * Phones: strip +91/spaces/dashes, compare last 10 digits
-  * Addresses: ignore case, punctuation, St=Street, Rd=Road
-  * Email: case insensitive
-- Same CIF/account number = very strong duplicate signal
-- Same email = very strong signal
-- Same phone = strong signal
-- Same IP = moderate signal
-- Name similarity alone = weak, needs corroboration
-- Different city alone is NOT enough to call different person
+    # First name match check — handle abbreviations like "M." vs "Mohd"
+    fn_match = False
+    for fa in fn_a:
+        for fb in fn_b:
+            if not fa or not fb: continue
+            # exact match
+            if fa == fb:
+                fn_match = True
+            # abbreviation: one is single letter, other starts with same letter
+            elif (len(fa)==1 and fb.startswith(fa)) or (len(fb)==1 and fa.startswith(fb)):
+                fn_match = True
 
-Return ONLY a JSON array, one result per pair, in the same order:
+    ln_match = any(la == lb and la for la in ln_a for lb in ln_b)
+
+    # Full name match
+    fln_a = [n_name(v) for v in get_col(rec_a, col_map, "fullname")]
+    fln_b = [n_name(v) for v in get_col(rec_b, col_map, "fullname")]
+    fullname_match = any(fa == fb and fa for fa in fln_a for fb in fln_b)
+
+    if (fn_match and ln_match) or fullname_match:
+        score += 25
+        signals.append("✅ Same full name (+25)")
+    elif fn_match and not ln_match:
+        score += 8
+        signals.append("⚠️ Same first name only (+8)")
+    # last name alone = 0, no signal added
+
+    # ── DOB ────────────────────────────────────────────────────────
+    dob_match = False
+    for v in get_col(rec_a, col_map, "dob"):
+        for u in get_col(rec_b, col_map, "dob"):
+            da, db_ = n_dob(v), n_dob(u)
+            if da == db_ and da:
+                dob_match = True
+                score += 20
+                signals.append("✅ Same DOB (+20)")
+                break
+        if dob_match: break
+
+    # ── IP Address ────────────────────────────────────────────────
+    for v in get_col(rec_a, col_map, "ip"):
+        for u in get_col(rec_b, col_map, "ip"):
+            if n_ip(v) == n_ip(u) and n_ip(v) and n_ip(v) not in ("0.0.0.0",""):
+                score += 18
+                signals.append("✅ Same IP (+18)")
+
+    # ── Address ───────────────────────────────────────────────────
+    for v in get_col(rec_a, col_map, "address"):
+        for u in get_col(rec_b, col_map, "address"):
+            na_, nb_ = n_addr(v), n_addr(u)
+            if na_ == nb_ and len(na_) > 4:
+                score += 15
+                signals.append("✅ Same address (+15)")
+
+    # ── City ──────────────────────────────────────────────────────
+    for v in get_col(rec_a, col_map, "city"):
+        for u in get_col(rec_b, col_map, "city"):
+            if n_name(v) == n_name(u) and n_name(v):
+                score += 5
+                signals.append("⚠️ Same city (+5)")
+
+    # ── Gender ────────────────────────────────────────────────────
+    for v in get_col(rec_a, col_map, "gender"):
+        for u in get_col(rec_b, col_map, "gender"):
+            if str(v).strip().upper() == str(u).strip().upper() and str(v).strip():
+                score += 2  # silent, too weak to show
+
+    return score, list(dict.fromkeys(signals))  # deduplicate signals
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 4 — GEMINI FOR AMBIGUOUS PAIRS ONLY (score 35–79)
+# ══════════════════════════════════════════════════════════════════════
+def gemini_score_batch(pairs_data, col_map):
+    """Send ambiguous pairs to Gemini in one call. Returns {pair_index: decision}."""
+    if not pairs_data: return {}
+
+    prompt = f"""You are an MDM expert deciding if customer records are the same real person.
+
+Column types for reference: {json.dumps(col_map)}
+
+Pairs to review:
+{json.dumps(pairs_data, default=str, indent=2)}
+
+Rules:
+- "M." and "Mohd" = same first name (abbreviation)
+- Dates in any format — normalize then compare
+- Phone: strip country code (+91), compare last 10 digits
+- Address: ignore case, punctuation, spacing
+- Same last name alone = NOT a duplicate
+- Same city alone = NOT a duplicate
+- Need at least 2 independent matching signals
+
+Return ONLY a JSON array:
 [
   {{
-    "pair_index": <same number from input>,
-    "decision": "DUPLICATE" or "NOT_DUPLICATE" or "NEEDS_REVIEW",
+    "pair_index": <number from input>,
+    "decision": "DUPLICATE" or "NOT_DUPLICATE",
     "confidence": <0-100>,
-    "matched_on": "<comma separated field names that matched>",
-    "reason": "<one clear sentence>",
-    "surviving_record": "A" or "B"
-  }},
-  ...
-]
-
-Return ONLY the JSON array. No explanation. No markdown."""
+    "reason": "<one sentence why>"
+  }}
+]"""
 
     try:
-        results = claude_json(prompt, max_tokens=4000)
+        results = gemini_json(prompt, max_tokens=2000)
         if isinstance(results, list):
-            return {r["pair_index"]: r for r in results}
-        return {}
-    except Exception as e:
-        return {}
+            return {r["pair_index"]: r for r in results if "pair_index" in r}
+    except:
+        pass
+    return {}
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 5 — UNION-FIND CLUSTERING
+# Groups any number of linked records into one cluster
+# ══════════════════════════════════════════════════════════════════════
+class UF:
+    def __init__(self):
+        self.p = {}
+    def find(self, x):
+        self.p.setdefault(x, x)
+        if self.p[x] != x: self.p[x] = self.find(self.p[x])
+        return self.p[x]
+    def union(self, x, y):
+        self.p[self.find(x)] = self.find(y)
+    def get_clusters(self, nodes):
+        g = defaultdict(list)
+        for n in nodes:
+            g[self.find(n)].append(n)
+        return [v for v in g.values() if len(v) > 1]
+
+# ══════════════════════════════════════════════════════════════════════
+# FULL PIPELINE
+# ══════════════════════════════════════════════════════════════════════
+def run_full_analysis(all_df):
+    cols     = list(all_df.columns)
+    all_recs = all_df.to_dict(orient="records")
+    n        = len(all_recs)
+
+    status  = st.empty()
+    bar     = st.progress(0)
+    detail  = st.empty()
+
+    # ── Step 1: Gemini understands table ──────────────────────────
+    status.markdown(step_msg("1/5", "Gemini reading table structure..."))
+    bar.progress(5)
+    id_col, col_map = understand_table(all_df)
+    if not id_col: id_col = cols[0]
+    st.session_state.col_map = col_map
+    st.session_state.id_col  = id_col
+    detail.markdown(hint(f"ID: {id_col} | " + " · ".join(f"{c}={t}" for c,t in col_map.items())))
+
+    # ── Step 2: Build candidate pairs via blocking ─────────────────
+    status.markdown(step_msg("2/5", "Building candidate pairs via blocking..."))
+    bar.progress(20)
+    pairs = build_candidate_pairs(all_recs, col_map)
+    detail.markdown(hint(f"Total possible pairs: {n*(n-1)//2:,} · Candidate pairs after blocking: {len(pairs)}"))
+
+    # ── Step 3: Python signal scoring ─────────────────────────────
+    status.markdown(step_msg("3/5", "Signal scoring all candidate pairs..."))
+    bar.progress(35)
+
+    uf          = UF()
+    gemini_q    = []   # pairs to send to Gemini
+    pair_meta   = {}   # (i,j) -> {score, signals, gemini_result}
+    auto_count  = 0
+    drop_count  = 0
+
+    for i, j in pairs:
+        score, signals = score_pair(all_recs[i], all_recs[j], col_map)
+
+        if score >= 80:
+            # High confidence — auto link
+            id_i = str(all_recs[i].get(id_col, f"row_{i}"))
+            id_j = str(all_recs[j].get(id_col, f"row_{j}"))
+            uf.union(id_i, id_j)
+            pair_meta[(i,j)] = {"score": score, "signals": signals, "source": "auto"}
+            auto_count += 1
+
+        elif score >= 35:
+            # Ambiguous — queue for Gemini
+            gemini_q.append((i, j, score, signals))
+            pair_meta[(i,j)] = {"score": score, "signals": signals, "source": "gemini_pending"}
+
+        else:
+            # Not enough evidence — drop silently
+            drop_count += 1
+
+    detail.markdown(hint(f"Auto-linked (score≥80): {auto_count} · Gemini queue (35-79): {len(gemini_q)} · Dropped noise (<35): {drop_count}"))
+
+    # ── Step 4: Gemini reviews ambiguous pairs ─────────────────────
+    status.markdown(step_msg("4/5", f"Gemini reviewing {len(gemini_q)} ambiguous pairs..."))
+    bar.progress(50)
+
+    CHUNK = 10
+    for start in range(0, len(gemini_q), CHUNK):
+        chunk = gemini_q[start:start+CHUNK]
+        batch = []
+        for idx, (i, j, score, signals) in enumerate(chunk):
+            batch.append({
+                "pair_index": start + idx,
+                "pre_score":  score,
+                "signals_found": signals,
+                "record_A":  all_recs[i],
+                "record_B":  all_recs[j],
+            })
+
+        results = gemini_score_batch(batch, col_map)
+
+        for idx, (i, j, score, signals) in enumerate(chunk):
+            res = results.get(start + idx, {})
+            if res.get("decision") == "DUPLICATE":
+                id_i = str(all_recs[i].get(id_col, f"row_{i}"))
+                id_j = str(all_recs[j].get(id_col, f"row_{j}"))
+                uf.union(id_i, id_j)
+                conf = int(res.get("confidence", score))
+                pair_meta[(i,j)].update({
+                    "score": max(score, conf),
+                    "signals": signals + [f"🤖 Gemini: {res.get('reason','')}"],
+                    "source": "gemini_confirmed"
+                })
+            else:
+                pair_meta[(i,j)]["source"] = "gemini_rejected"
+
+        pct = 50 + int(((start+CHUNK)/max(len(gemini_q),1))*30)
+        bar.progress(min(pct, 80))
+
+    # ── Step 5: Build clusters ─────────────────────────────────────
+    status.markdown(step_msg("5/5", "Building clusters..."))
+    bar.progress(85)
+
+    all_ids    = [str(r.get(id_col, f"row_{i}")) for i,r in enumerate(all_recs)]
+    id_to_rec  = {str(r.get(id_col, f"row_{i}")): r for i,r in enumerate(all_recs)}
+    id_to_idx  = {str(r.get(id_col, f"row_{i}")): i for i,r in enumerate(all_recs)}
+
+    raw_clusters = uf.get_clusters(all_ids)
+    clusters = []
+
+    for cids in raw_clusters:
+        recs = [id_to_rec[c] for c in cids if c in id_to_rec]
+        idxs = [id_to_idx[c] for c in cids if c in id_to_idx]
+
+        # Collect all pair scores within this cluster
+        c_scores  = []
+        c_signals = []
+        for ii, ij in combinations(sorted(idxs), 2):
+            key = (min(ii,ij), max(ii,ij))
+            if key in pair_meta:
+                c_scores.append(pair_meta[key]["score"])
+                c_signals.extend(pair_meta[key]["signals"])
+
+        avg_score     = int(sum(c_scores)/len(c_scores)) if c_scores else 50
+        unique_signals = list(dict.fromkeys(c_signals))
+
+        clusters.append({
+            "cluster_id":   str(uuid.uuid4())[:8].upper(),
+            "record_ids":   cids,
+            "records":      recs,
+            "record_count": len(cids),
+            "avg_score":    avg_score,
+            "signals":      unique_signals,
+        })
+
+    clusters.sort(key=lambda x: x["avg_score"], reverse=True)
+    bar.progress(100)
+    status.markdown(step_msg("✅ Done", f"Found {len(clusters)} clusters covering {sum(c['record_count'] for c in clusters)} records"))
+
+    return clusters
 
 # ══════════════════════════════════════════════════════════════════════
 # UI HELPERS
 # ══════════════════════════════════════════════════════════════════════
+def step_msg(label, msg):
+    return f'<p style="font-family:DM Mono,monospace;font-size:13px;color:#8892b0;"><span style="color:#4f8ef7;font-weight:700;">{label}</span> · {msg}</p>'
+
+def hint(msg):
+    return f'<p style="font-family:DM Mono,monospace;font-size:11px;color:#2d3555;margin:4px 0 8px;">{msg}</p>'
+
+def card_open(label):
+    return f'<div style="background:#0f1420;border:1px solid #1e2535;border-radius:12px;padding:24px 28px;margin-bottom:16px;"><p style="color:#4f8ef7;font-family:DM Mono,monospace;font-size:11px;text-transform:uppercase;letter-spacing:2px;margin-bottom:16px;">{label}</p>'
+
+def score_pill(score):
+    c = "#22c55e" if score>=70 else "#f59e0b" if score>=40 else "#ef4444"
+    return f'<span style="background:{c}22;border:1px solid {c}55;border-radius:20px;padding:4px 14px;font-family:DM Mono,monospace;font-size:12px;color:{c};">score {score}</span>'
+
 def topbar(title, subtitle=""):
-    h1, h2, h3 = st.columns([4,2,1])
+    h1,h2,h3 = st.columns([4,2,1])
     with h1:
-        st.markdown(f'<h2 style="color:#f9fafb;margin:0;font-size:22px;">❄️ {title}</h2>', unsafe_allow_html=True)
+        st.markdown(f'<h2 style="color:#e8eaf0;margin:0;font-size:22px;">❄️ {title}</h2>', unsafe_allow_html=True)
         if subtitle:
-            st.markdown(f'<p style="color:#6b7280;font-family:DM Mono,monospace;font-size:11px;margin:4px 0 0;">{subtitle}</p>', unsafe_allow_html=True)
+            st.markdown(f'<p style="color:#4b5680;font-family:DM Mono,monospace;font-size:11px;margin:4px 0 0;">{subtitle}</p>', unsafe_allow_html=True)
     with h2:
         steps  = ["login","setup","table","agent","hitl","golden"]
         labels = ["Login","Setup","View","Agent","Review","Golden"]
         cur    = st.session_state.page
         idx    = steps.index(cur) if cur in steps else 0
-        html   = '<div style="display:flex;gap:4px;align-items:center;padding-top:8px;">'
+        html   = '<div style="display:flex;gap:4px;align-items:center;padding-top:10px;">'
         for i,lbl in enumerate(labels):
-            bg = "#3b82f6" if i==idx else ("#10b981" if i<idx else "#1f2937")
-            fc = "#f9fafb" if i<=idx else "#4b5563"
-            html += f'<div style="background:{bg};border-radius:4px;padding:3px 8px;font-family:DM Mono,monospace;font-size:9px;color:{fc};white-space:nowrap;">{lbl}</div>'
+            bg = "#4f8ef7" if i==idx else ("#22c55e" if i<idx else "#1e2535")
+            fc = "#fff" if i<=idx else "#4b5680"
+            html += f'<div style="background:{bg};border-radius:4px;padding:3px 8px;font-family:DM Mono,monospace;font-size:9px;color:{fc};">{lbl}</div>'
         html += '</div>'
         st.markdown(html, unsafe_allow_html=True)
     with h3:
@@ -285,47 +574,39 @@ def topbar(title, subtitle=""):
             for k in list(st.session_state.keys()): del st.session_state[k]
             st.rerun()
 
-def card(label):
-    return f'<div style="background:#111827;border:1px solid #1f2937;border-radius:12px;padding:24px 28px;margin-bottom:16px;"><p style="color:#3b82f6;font-family:DM Mono,monospace;font-size:11px;text-transform:uppercase;letter-spacing:2px;margin-bottom:16px;">{label}</p>'
-
-def step_msg(label, msg):
-    return f'<p style="font-family:DM Mono,monospace;font-size:13px;color:#9ca3af;"><span style="color:#3b82f6;font-weight:700;">{label}</span> · {msg}</p>'
-
 # ══════════════════════════════════════════════════════════════════════
 # PAGE 1 — LOGIN
 # ══════════════════════════════════════════════════════════════════════
 def page_login():
     st.markdown("<br><br>", unsafe_allow_html=True)
-    _, c, _ = st.columns([1,1.1,1])
+    _,c,_ = st.columns([1,1.2,1])
     with c:
         st.markdown("""
         <div style="text-align:center;margin-bottom:32px;">
-            <div style="font-size:56px;margin-bottom:10px;">❄️</div>
-            <div style="font-size:28px;font-weight:800;color:#f9fafb;">MDM Agent</div>
-            <div style="font-family:'DM Mono',monospace;font-size:12px;color:#4b5563;
-                 margin-top:6px;letter-spacing:2px;">MASTER DATA MANAGEMENT · AI POWERED</div>
+            <div style="font-size:56px;">❄️</div>
+            <div style="font-size:28px;font-weight:800;color:#e8eaf0;margin-top:8px;">MDM Agent</div>
+            <div style="font-family:'DM Mono',monospace;font-size:11px;color:#2d3555;
+                 margin-top:8px;letter-spacing:3px;">MASTER DATA MANAGEMENT · AI POWERED</div>
         </div>
         """, unsafe_allow_html=True)
-
-        st.markdown('<div style="background:#111827;border:1px solid #1f2937;border-radius:14px;padding:32px 36px;">', unsafe_allow_html=True)
+        st.markdown('<div style="background:#0f1420;border:1px solid #1e2535;border-radius:14px;padding:32px 36px;">', unsafe_allow_html=True)
         account  = st.text_input("Snowflake Account",  placeholder="xy12345.us-east-1")
         username = st.text_input("Username",            placeholder="your_username")
-        password = st.text_input("Password", type="password", placeholder="••••••••")
-        api_key  = st.text_input("Gemini API Key",  type="password", placeholder="AIza...")
+        password = st.text_input("Password",           type="password", placeholder="••••••••")
+        api_key  = st.text_input("Gemini API Key",     type="password", placeholder="AIza...")
         st.markdown("<br>", unsafe_allow_html=True)
-
         if st.button("Connect & Start →"):
-            if not all([account, username, password, api_key]):
+            if not all([account,username,password,api_key]):
                 st.error("Please fill all fields.")
             else:
-                with st.spinner("Connecting to Snowflake..."):
+                with st.spinner("Connecting..."):
                     try:
                         conn = snowflake.connector.connect(
                             account=account.strip(), user=username.strip(),
                             password=password.strip(), login_timeout=15)
-                        st.session_state.sf_conn       = conn
-                        st.session_state.sf_account    = account.strip()
-                        st.session_state.sf_user       = username.strip()
+                        st.session_state.sf_conn    = conn
+                        st.session_state.sf_account = account.strip()
+                        st.session_state.sf_user    = username.strip()
                         st.session_state.gemini_key = api_key.strip()
                         cur = conn.cursor()
                         cur.execute("SHOW WAREHOUSES")
@@ -338,7 +619,7 @@ def page_login():
                     except Exception as e:
                         st.error(f"Connection failed: {e}")
         st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center;color:#374151;font-family:DM Mono,monospace;font-size:11px;margin-top:14px;">🔒 Nothing stored · Session only</p>', unsafe_allow_html=True)
+        st.markdown('<p style="text-align:center;color:#1e2535;font-family:DM Mono,monospace;font-size:11px;margin-top:14px;">🔒 Session only · Nothing stored</p>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════
 # PAGE 2 — SETUP
@@ -347,19 +628,17 @@ def page_setup():
     topbar("Select Data Source")
     st.markdown("---")
 
-    st.markdown(card("01 · Warehouse & Database"), unsafe_allow_html=True)
+    st.markdown(card_open("01 · Warehouse & Database"), unsafe_allow_html=True)
     c1,c2 = st.columns(2)
     with c1: wh = st.selectbox("Warehouse", st.session_state.warehouses, key="wh_s")
     with c2: db = st.selectbox("Database",  st.session_state.databases,  key="db_s")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown(card("02 · Schema"), unsafe_allow_html=True)
+    st.markdown(card_open("02 · Schema"), unsafe_allow_html=True)
     schema = None
     if db:
         if st.session_state.sel_db != db:
-            st.session_state.sel_db = db
-            st.session_state.schemas = []
-            st.session_state.sel_schema = None
+            st.session_state.sel_db = db; st.session_state.schemas = []
             try:
                 cur = st.session_state.sf_conn.cursor()
                 cur.execute(f'SHOW SCHEMAS IN DATABASE "{db}"')
@@ -372,12 +651,11 @@ def page_setup():
     else: st.info("Select a database first.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown(card("03 · Table"), unsafe_allow_html=True)
+    st.markdown(card_open("03 · Table"), unsafe_allow_html=True)
     table = None
     if schema:
         if st.session_state.sel_schema != schema:
-            st.session_state.sel_schema = schema
-            st.session_state.tables = []
+            st.session_state.sel_schema = schema; st.session_state.tables = []
             try:
                 cur = st.session_state.sf_conn.cursor()
                 cur.execute(f'SHOW TABLES IN "{db}"."{schema}"')
@@ -392,7 +670,7 @@ def page_setup():
 
     if wh and db and schema and table:
         ca,cb = st.columns([1,2])
-        with ca: rpp = st.selectbox("Rows / page", [25,50,100,200], index=1)
+        with ca: rpp = st.selectbox("Rows/page",[25,50,100,200],index=1)
         with cb:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button(f"Load  {table}  →"):
@@ -401,18 +679,15 @@ def page_setup():
                         cur = st.session_state.sf_conn.cursor()
                         cur.execute(f'USE WAREHOUSE "{wh}"')
                         cur.close()
-                        st.session_state.sel_wh        = wh
-                        st.session_state.sel_db        = db
-                        st.session_state.sel_schema    = schema
-                        st.session_state.sel_table     = table
+                        st.session_state.sel_wh = wh; st.session_state.sel_db = db
+                        st.session_state.sel_schema = schema; st.session_state.sel_table = table
                         st.session_state.rows_per_page = rpp
-                        st.session_state.total_rows    = get_count()
-                        st.session_state.df            = get_page(rpp, 0)
-                        st.session_state.current_page  = 1
+                        st.session_state.total_rows = fetch_count()
+                        st.session_state.df = fetch_page(rpp,0)
+                        st.session_state.current_page = 1
                         st.session_state.analysis_done = False
-                        st.session_state.candidates    = []
-                        st.session_state.decisions     = {}
-                        st.session_state.table_schema  = None
+                        st.session_state.clusters = []
+                        st.session_state.decisions = {}
                         st.session_state.page = "table"
                         st.rerun()
                     except Exception as e: st.error(str(e))
@@ -422,11 +697,11 @@ def page_setup():
 # ══════════════════════════════════════════════════════════════════════
 def page_table():
     db,sc,tb = st.session_state.sel_db,st.session_state.sel_schema,st.session_state.sel_table
-    rpp      = st.session_state.rows_per_page
-    total    = st.session_state.total_rows
-    pg       = st.session_state.current_page
-    tp       = max(1,-(-total//rpp))
-    s,e      = (pg-1)*rpp+1, min(pg*rpp,total)
+    rpp   = st.session_state.rows_per_page
+    total = st.session_state.total_rows
+    pg    = st.session_state.current_page
+    tp    = max(1,-(-total//rpp))
+    s,e   = (pg-1)*rpp+1, min(pg*rpp,total)
 
     topbar(f"{tb}", subtitle=f"{db} · {sc}")
     st.markdown("---")
@@ -438,165 +713,70 @@ def page_table():
     m4.metric("Rows/Page",  rpp)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    st.dataframe(st.session_state.df, use_container_width=True, height=500, hide_index=True)
+    st.dataframe(st.session_state.df, use_container_width=True, height=480, hide_index=True)
 
     p1,p2,p3,p4,p5 = st.columns([1,1,2,1,1])
     with p1:
-        if st.button("⟨⟨ First", disabled=(pg==1), key="bf"):
-            st.session_state.current_page=1
-            st.session_state.df=get_page(rpp,0); st.rerun()
+        if st.button("⟨⟨ First",disabled=(pg==1),key="bf"):
+            st.session_state.current_page=1; st.session_state.df=fetch_page(rpp,0); st.rerun()
     with p2:
-        if st.button("⟨ Prev", disabled=(pg==1), key="bp"):
+        if st.button("⟨ Prev",disabled=(pg==1),key="bp"):
             st.session_state.current_page-=1
-            st.session_state.df=get_page(rpp,(st.session_state.current_page-1)*rpp); st.rerun()
+            st.session_state.df=fetch_page(rpp,(st.session_state.current_page-1)*rpp); st.rerun()
     with p3:
-        st.markdown(f'<div style="text-align:center;padding:10px 0;font-family:DM Mono,monospace;font-size:12px;color:#6b7280;">Rows <b style="color:#3b82f6">{s:,}</b>–<b style="color:#3b82f6">{e:,}</b> of <b style="color:#f9fafb">{total:,}</b></div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="text-align:center;padding:10px 0;font-family:DM Mono,monospace;font-size:12px;color:#4b5680;">Rows <b style="color:#4f8ef7">{s:,}–{e:,}</b> of <b style="color:#e8eaf0">{total:,}</b></div>', unsafe_allow_html=True)
     with p4:
-        if st.button("Next ⟩",  disabled=(pg>=tp), key="bn"):
+        if st.button("Next ⟩",disabled=(pg>=tp),key="bn"):
             st.session_state.current_page+=1
-            st.session_state.df=get_page(rpp,(st.session_state.current_page-1)*rpp); st.rerun()
+            st.session_state.df=fetch_page(rpp,(st.session_state.current_page-1)*rpp); st.rerun()
     with p5:
-        if st.button("Last ⟩⟩", disabled=(pg>=tp), key="bl"):
+        if st.button("Last ⟩⟩",disabled=(pg>=tp),key="bl"):
             st.session_state.current_page=tp
-            st.session_state.df=get_page(rpp,(tp-1)*rpp); st.rerun()
+            st.session_state.df=fetch_page(rpp,(tp-1)*rpp); st.rerun()
 
     j1,j2,_ = st.columns([1,1,4])
     with j1: jump = st.number_input("Jump to page",1,tp,pg,1)
     with j2:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Go →", key="bj"):
+        if st.button("Go →",key="bj"):
             st.session_state.current_page=int(jump)
-            st.session_state.df=get_page(rpp,(int(jump)-1)*rpp); st.rerun()
+            st.session_state.df=fetch_page(rpp,(int(jump)-1)*rpp); st.rerun()
 
     st.markdown("---")
-    st.markdown(card("🤖 MDM Duplicate Detection Agent"), unsafe_allow_html=True)
-    st.markdown('<p style="color:#9ca3af;font-size:13px;margin-bottom:8px;">The agent will first <b style="color:#f9fafb">read your table structure</b> and understand what each column means — no matter what the column names are. Then it will find all duplicate customers across the entire table.</p>', unsafe_allow_html=True)
-    st.markdown('<p style="color:#6b7280;font-family:DM Mono,monospace;font-size:11px;margin-bottom:16px;">Works on any table · any column names · any date formats · any combinations</p>', unsafe_allow_html=True)
+    st.markdown(card_open("🤖 MDM Duplicate Detection Agent"), unsafe_allow_html=True)
+    st.markdown('<p style="color:#8892b0;font-size:13px;margin-bottom:8px;">Finds clusters of <b style="color:#e8eaf0">any size</b> — 2, 3, 5+ records that are the same person. Uses smart blocking + signal scoring. Gemini only reviews genuinely ambiguous cases.</p>', unsafe_allow_html=True)
     if st.button("🔍 Run MDM Agent →"):
-        st.session_state.page = "agent"; st.rerun()
+        st.session_state.page="agent"; st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════
 # PAGE 4 — AGENT
 # ══════════════════════════════════════════════════════════════════════
 def page_agent():
-    topbar("MDM Agent Running", subtitle="Claude is analyzing your table")
+    topbar("MDM Agent Running", subtitle="Blocking → Scoring → Gemini → Clustering")
     st.markdown("---")
-
     db,sc,tb = st.session_state.sel_db,st.session_state.sel_schema,st.session_state.sel_table
 
     if not st.session_state.analysis_done:
-        st.markdown('<div style="background:#111827;border:1px solid #1f2937;border-radius:14px;padding:32px;">', unsafe_allow_html=True)
-        status  = st.empty()
-        bar     = st.progress(0)
-        detail  = st.empty()
-        insight = st.empty()
-
-        # ── Step 1: Fetch ALL records ─────────────────────────────────
-        status.markdown(step_msg("Step 1/4","Fetching all records from Snowflake..."))
-        bar.progress(5)
+        st.markdown('<div style="background:#0f1420;border:1px solid #1e2535;border-radius:14px;padding:32px;">', unsafe_allow_html=True)
         all_df   = sf_query(f'SELECT * FROM "{db}"."{sc}"."{tb}"')
-        cols     = list(all_df.columns)
-        all_recs = all_df.to_dict(orient="records")
-        detail.markdown(f'<p style="color:#6b7280;font-family:DM Mono,monospace;font-size:12px;">✓ Fetched {len(all_recs):,} records · {len(cols)} columns detected: <span style="color:#3b82f6">{", ".join(cols)}</span></p>', unsafe_allow_html=True)
-
-        # ── Step 2: Claude understands the table ─────────────────────
-        status.markdown(step_msg("Step 2/4","Claude is reading and understanding your table structure..."))
-        bar.progress(20)
-
-        schema_info = claude_understand_table(all_df)
-        st.session_state.table_schema = schema_info
-
-        id_col = schema_info.get("id_column", cols[0])
-        col_types = schema_info.get("column_types", {})
-        blocking_cols = schema_info.get("blocking_columns", [])
-        notes = schema_info.get("notes", "")
-
-        insight.markdown(f"""
-        <div style="background:#0d1117;border:1px solid #1f2937;border-radius:10px;padding:16px;margin-top:12px;">
-            <p style="color:#3b82f6;font-family:DM Mono,monospace;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;">🧠 Claude's Table Understanding</p>
-            <p style="color:#9ca3af;font-family:DM Mono,monospace;font-size:12px;margin-bottom:6px;"><b style="color:#f9fafb;">ID Column:</b> {id_col}</p>
-            <p style="color:#9ca3af;font-family:DM Mono,monospace;font-size:12px;margin-bottom:6px;"><b style="color:#f9fafb;">Column Types:</b> {", ".join([f"{k}={v}" for k,v in col_types.items()])}</p>
-            <p style="color:#9ca3af;font-family:DM Mono,monospace;font-size:12px;margin-bottom:6px;"><b style="color:#f9fafb;">Blocking On:</b> {", ".join(blocking_cols)}</p>
-            <p style="color:#9ca3af;font-family:DM Mono,monospace;font-size:12px;"><b style="color:#f9fafb;">Observations:</b> {notes}</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # ── Step 3: Build candidate pairs ────────────────────────────
-        status.markdown(step_msg("Step 3/4","Building candidate pairs using Claude-defined blocking..."))
-        bar.progress(40)
-
-        pairs = build_candidate_pairs(all_recs, schema_info)
-        detail.markdown(f'<p style="color:#6b7280;font-family:DM Mono,monospace;font-size:12px;">✓ Found <b style="color:#3b82f6">{len(pairs)}</b> candidate pairs to score (skipped {len(all_recs)*(len(all_recs)-1)//2 - len(pairs):,} non-candidate combinations)</p>', unsafe_allow_html=True)
-
-        # ── Step 4: Claude scores every pair ─────────────────────────
-        status.markdown(step_msg("Step 4/4",f"Claude scoring {len(pairs)} pairs — normalizing and comparing..."))
-        candidates = []
-
-        # Build batch — all pairs in one list
-        pairs_data = []
-        for i,(ia,ib) in enumerate(pairs):
-            ra = all_recs[ia]
-            rb = all_recs[ib]
-            pairs_data.append({"pair_index": i, "rec_a": ra, "rec_b": rb})
-
-        detail.markdown(f'<p style="color:#6b7280;font-family:DM Mono,monospace;font-size:12px;">Sending all {len(pairs)} pairs to Gemini in one call...</p>', unsafe_allow_html=True)
-        bar.progress(70)
-
-        # ONE Gemini call for all pairs
-        results_map = score_pairs_batch(pairs_data, schema_info)
-        bar.progress(95)
-
-        for i,(ia,ib) in enumerate(pairs):
-            ra = all_recs[ia]
-            rb = all_recs[ib]
-            id_a = str(ra.get(id_col, f"row_{ia}"))
-            id_b = str(rb.get(id_col, f"row_{ib}"))
-            result = results_map.get(i, {
-                "decision":"NEEDS_REVIEW","confidence":0,
-                "matched_on":"not scored","reason":"No result returned","surviving_record":"A"
-            })
-            if result.get("decision") in ("DUPLICATE","NEEDS_REVIEW"):
-                candidates.append({
-                    "pair_id":    str(uuid.uuid4())[:8].upper(),
-                    "id_a":       id_a,
-                    "id_b":       id_b,
-                    "rec_a":      ra,
-                    "rec_b":      rb,
-                    "decision":   result.get("decision","NEEDS_REVIEW"),
-                    "confidence": int(result.get("confidence",0)),
-                    "matched_on": result.get("matched_on",""),
-                    "reason":     result.get("reason",""),
-                    "surviving":  result.get("surviving_record","A"),
-                    "status":     "PENDING"
-                })
-
-        bar.progress(100)
-        status.markdown(step_msg("✅ Complete", f"Found {len(candidates)} duplicate/review candidates"))
-        st.session_state.candidates    = candidates
+        clusters = run_full_analysis(all_df)
+        st.session_state.clusters      = clusters
         st.session_state.analysis_done = True
-        st.session_state.decisions     = {c["pair_id"]:"PENDING" for c in candidates}
+        st.session_state.decisions     = {c["cluster_id"]:"PENDING" for c in clusters}
         st.markdown("</div>", unsafe_allow_html=True)
         st.rerun()
-
     else:
-        cands = st.session_state.candidates
-        dups  = [c for c in cands if c["decision"]=="DUPLICATE"]
-        revs  = [c for c in cands if c["decision"]=="NEEDS_REVIEW"]
-
-        st.success(f"✅ Analysis complete — **{len(cands)}** candidate pairs found")
-
-        # Show schema insight
-        si = st.session_state.table_schema
-        if si:
-            with st.expander("🧠 Claude's Table Understanding", expanded=False):
-                st.json(si)
-
+        clusters   = st.session_state.clusters
+        total_recs = sum(c["record_count"] for c in clusters)
+        st.success(f"✅ Found **{len(clusters)} duplicate clusters** covering **{total_recs} records**")
         m1,m2,m3 = st.columns(3)
-        m1.metric("Duplicates",   len(dups))
-        m2.metric("Needs Review", len(revs))
-        m3.metric("Total Scored", len(cands))
-
+        m1.metric("Clusters",       len(clusters))
+        m2.metric("Records Affected",total_recs)
+        m3.metric("To Merge",        total_recs - len(clusters))
+        if st.session_state.col_map:
+            with st.expander("🧠 How Gemini understood your table"):
+                st.json(st.session_state.col_map)
         st.markdown("<br>", unsafe_allow_html=True)
         c1,c2 = st.columns(2)
         with c1:
@@ -605,22 +785,21 @@ def page_agent():
         with c2:
             if st.button("🔄 Re-run Analysis"):
                 st.session_state.analysis_done=False
-                st.session_state.candidates=[]
-                st.session_state.decisions={}
+                st.session_state.clusters=[]
                 st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════
-# PAGE 5 — HITL REVIEW
+# PAGE 5 — HITL CLUSTER REVIEW
 # ══════════════════════════════════════════════════════════════════════
 def page_hitl():
-    topbar("Human Review", subtitle="Approve or reject each duplicate pair")
+    topbar("Human Review", subtitle="Review each cluster — approve or reject the merge")
     st.markdown("---")
 
-    cands     = st.session_state.candidates
+    clusters  = st.session_state.clusters
     decisions = st.session_state.decisions
 
-    if not cands:
-        st.info("No candidates. Run the agent first.")
+    if not clusters:
+        st.info("No clusters found. Run the agent first.")
         if st.button("← Back"): st.session_state.page="table"; st.rerun()
         return
 
@@ -629,282 +808,233 @@ def page_hitl():
     pending  = sum(1 for v in decisions.values() if v=="PENDING")
 
     m1,m2,m3,m4 = st.columns(4)
-    m1.metric("Total Pairs", len(cands))
-    m2.metric("✅ Approved",  approved)
-    m3.metric("❌ Rejected",  rejected)
-    m4.metric("⏳ Pending",   pending)
+    m1.metric("Total Clusters", len(clusters))
+    m2.metric("✅ Approved",    approved)
+    m3.metric("❌ Rejected",    rejected)
+    m4.metric("⏳ Pending",     pending)
 
-    # Bulk actions
     st.markdown("<br>", unsafe_allow_html=True)
     ba,bb,bc = st.columns(3)
-    with ba:
-        thresh = st.slider("Bulk approve threshold", 70, 100, 90)
+    with ba: thresh = st.slider("Bulk approve — min score", 30, 100, 70)
     with bb:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button(f"✅ Approve all ≥ {thresh}%"):
-            for c in cands:
-                if c["confidence"] >= thresh:
-                    st.session_state.decisions[c["pair_id"]] = "APPROVED"
+        if st.button(f"✅ Approve all ≥ {thresh}"):
+            for c in clusters:
+                if c["avg_score"] >= thresh:
+                    decisions[c["cluster_id"]] = "APPROVED"
             st.rerun()
     with bc:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("❌ Reject all < 70%"):
-            for c in cands:
-                if c["confidence"] < 70:
-                    st.session_state.decisions[c["pair_id"]] = "REJECTED"
+        if st.button("❌ Reject all < 40"):
+            for c in clusters:
+                if c["avg_score"] < 40:
+                    decisions[c["cluster_id"]] = "REJECTED"
             st.rerun()
 
     st.markdown("---")
-
     tab1,tab2,tab3 = st.tabs([
         f"⏳ Pending ({pending})",
         f"✅ Approved ({approved})",
         f"❌ Rejected ({rejected})"
     ])
 
-    def render_pairs(filter_status):
-        shown = [c for c in cands if decisions.get(c["pair_id"])==filter_status]
+    def render_clusters(filter_status):
+        shown = [c for c in clusters if decisions.get(c["cluster_id"])==filter_status]
         if not shown:
-            st.markdown('<p style="color:#6b7280;font-family:DM Mono,monospace;font-size:13px;padding:20px 0;">Nothing here yet.</p>', unsafe_allow_html=True)
+            st.markdown('<p style="color:#4b5680;font-family:DM Mono,monospace;font-size:13px;padding:20px 0;">Nothing here.</p>', unsafe_allow_html=True)
             return
 
-        for c in shown:
-            conf  = c["confidence"]
-            cc    = "#10b981" if conf>=85 else "#f59e0b" if conf>=65 else "#ef4444"
-            dec_badge = "🔴 DUPLICATE" if c["decision"]=="DUPLICATE" else "🟡 NEEDS REVIEW"
+        for cluster in shown:
+            cid    = cluster["cluster_id"]
+            score  = cluster["avg_score"]
+            recs   = cluster["records"]
+            signals= cluster["signals"]
+            n_recs = cluster["record_count"]
 
+            sc_col = "#22c55e" if score>=70 else "#f59e0b" if score>=40 else "#ef4444"
+
+            # ── Cluster card ──────────────────────────────────────
             st.markdown(f"""
-            <div style="background:#111827;border:1px solid #1f2937;border-radius:14px;padding:24px;margin-bottom:8px;">
+            <div style="background:#0f1420;border:1px solid #1e2535;
+                 border-radius:14px;padding:20px 24px;margin-bottom:8px;">
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
-                    <span style="font-family:DM Mono,monospace;font-size:11px;color:#4b5563;">#{c['pair_id']}</span>
-                    <span style="background:{cc}22;border:1px solid {cc}55;border-radius:20px;
-                          padding:3px 12px;font-family:DM Mono,monospace;font-size:12px;color:{cc};">
-                        {conf}% confidence
+                    <span style="font-family:DM Mono,monospace;font-size:11px;color:#4b5680;">
+                        CLUSTER #{cid}
                     </span>
-                    <span style="background:#1f2937;border-radius:20px;padding:3px 12px;
-                          font-family:DM Mono,monospace;font-size:11px;color:#9ca3af;">
-                        {dec_badge}
-                    </span>
-                    <span style="background:#1f293799;border-radius:20px;padding:3px 12px;
-                          font-family:DM Mono,monospace;font-size:11px;color:#6b7280;">
-                        matched: {c['matched_on']}
+                    {score_pill(score)}
+                    <span style="background:#1e2535;border-radius:20px;padding:4px 14px;
+                          font-family:DM Mono,monospace;font-size:11px;color:#8892b0;">
+                        {n_recs} records
                     </span>
                 </div>
-                <p style="color:#6b7280;font-family:DM Mono,monospace;font-size:12px;
-                   font-style:italic;margin:0;">"{c['reason']}"</p>
+                <div style="background:#07090f;border-radius:8px;padding:10px 14px;margin-bottom:6px;">
+                    <div style="font-family:DM Mono,monospace;font-size:10px;color:#4b5680;
+                         text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">
+                         Evidence
+                    </div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                        {"".join([f'<span style="background:#1e2535;border-radius:4px;padding:3px 10px;font-family:DM Mono,monospace;font-size:11px;color:#8892b0;">{s}</span>' for s in signals[:8]])}
+                    </div>
+                    <div style="margin-top:10px;background:#1e2535;border-radius:4px;height:6px;">
+                        <div style="background:{sc_col};width:{min(score,100)}%;height:6px;border-radius:4px;"></div>
+                    </div>
+                </div>
             </div>
             """, unsafe_allow_html=True)
 
-            # Side by side
-            col_a, col_mid, col_b = st.columns([5,1,5])
-            ra, rb = c["rec_a"], c["rec_b"]
-            all_keys = list(ra.keys())
+            # ── Records side by side ──────────────────────────────
+            if recs:
+                all_keys = list(recs[0].keys())
+                id_col   = st.session_state.id_col or all_keys[0]
+                pal      = ["#4f8ef7","#7c5ce8","#22c55e","#f59e0b",
+                            "#ef4444","#06b6d4","#ec4899","#84cc16"]
+                cols_ui  = st.columns(n_recs)
 
-            def field_card(title, color, rec, other_rec):
-                st.markdown(f'<div style="background:#0d1117;border:1px solid #1f2937;border-radius:10px;padding:16px;">', unsafe_allow_html=True)
-                st.markdown(f'<p style="color:{color};font-family:DM Mono,monospace;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:14px;">{title}</p>', unsafe_allow_html=True)
-                for k in all_keys:
-                    va = str(rec.get(k,"") or "")
-                    vb = str(other_rec.get(k,"") or "")
-                    match = va.lower().strip()==vb.lower().strip() and va.strip()!=""
-                    vc = "#10b981" if match else "#f9fafb"
-                    st.markdown(f"""
-                    <div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #1f2937;">
-                        <div style="font-family:DM Mono,monospace;font-size:10px;color:#4b5563;text-transform:uppercase;margin-bottom:2px;">{k}</div>
-                        <div style="font-size:13px;color:{vc};">{va or "—"}</div>
-                    </div>""", unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
+                for ri, rec in enumerate(recs):
+                    rid = str(rec.get(id_col,"?"))
+                    cc  = pal[ri % len(pal)]
+                    with cols_ui[ri]:
+                        st.markdown(f'<div style="background:#07090f;border:1px solid #1e2535;border-radius:10px;padding:14px;">', unsafe_allow_html=True)
+                        st.markdown(f'<p style="color:{cc};font-family:DM Mono,monospace;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;">#{ri+1} · {rid}</p>', unsafe_allow_html=True)
+                        for k in all_keys:
+                            val      = str(rec.get(k,"") or "")
+                            all_vals = [str(r.get(k,"") or "").lower().strip() for r in recs]
+                            matching = len(set(v for v in all_vals if v)) == 1
+                            fc = "#22c55e" if matching else "#e8eaf0"
+                            st.markdown(f"""
+                            <div style="margin-bottom:7px;padding-bottom:7px;border-bottom:1px solid #1e2535;">
+                                <div style="font-family:DM Mono,monospace;font-size:9px;color:#2d3555;
+                                     text-transform:uppercase;margin-bottom:2px;">{k}</div>
+                                <div style="font-size:12px;color:{fc};">{val or "—"}</div>
+                            </div>""", unsafe_allow_html=True)
+                        st.markdown("</div>", unsafe_allow_html=True)
 
-            with col_a:
-                field_card(f"Record A · {c['id_a']}", "#3b82f6", ra, rb)
-            with col_mid:
-                st.markdown('<div style="text-align:center;padding-top:80px;font-size:22px;color:#374151;">⟷</div>', unsafe_allow_html=True)
-            with col_b:
-                field_card(f"Record B · {c['id_b']}", "#6366f1", rb, ra)
+                st.markdown('<p style="font-family:DM Mono,monospace;font-size:10px;color:#2d3555;margin:6px 0 4px;">🟢 Green = all records share the same value</p>', unsafe_allow_html=True)
 
-            # Matching fields note
-            st.markdown(f'<p style="font-family:DM Mono,monospace;font-size:11px;color:#374151;margin:8px 0 4px;">🟢 Green fields = matching values</p>', unsafe_allow_html=True)
-
-            # Action buttons
+            # ── Action buttons ────────────────────────────────────
             if filter_status == "PENDING":
-                b1,b2,b3 = st.columns([2,2,3])
+                b1,b2,_ = st.columns([2,2,3])
                 with b1:
-                    if st.button("✅ Approve", key=f"ap_{c['pair_id']}"):
-                        st.session_state.decisions[c["pair_id"]]="APPROVED"; st.rerun()
+                    if st.button("✅ Approve — merge all", key=f"ap_{cid}"):
+                        st.session_state.decisions[cid]="APPROVED"; st.rerun()
                 with b2:
-                    if st.button("❌ Reject",  key=f"rj_{c['pair_id']}"):
-                        st.session_state.decisions[c["pair_id"]]="REJECTED"; st.rerun()
-            elif filter_status == "APPROVED":
-                if st.button("↩ Undo Approve", key=f"ua_{c['pair_id']}"):
-                    st.session_state.decisions[c["pair_id"]]="PENDING"; st.rerun()
-            elif filter_status == "REJECTED":
-                if st.button("↩ Undo Reject", key=f"ur_{c['pair_id']}"):
-                    st.session_state.decisions[c["pair_id"]]="PENDING"; st.rerun()
+                    if st.button("❌ Reject — keep separate", key=f"rj_{cid}"):
+                        st.session_state.decisions[cid]="REJECTED"; st.rerun()
+            else:
+                if st.button("↩ Undo", key=f"ud_{cid}"):
+                    st.session_state.decisions[cid]="PENDING"; st.rerun()
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-    with tab1: render_pairs("PENDING")
-    with tab2: render_pairs("APPROVED")
-    with tab3: render_pairs("REJECTED")
+    with tab1: render_clusters("PENDING")
+    with tab2: render_clusters("APPROVED")
+    with tab3: render_clusters("REJECTED")
 
-    # Golden record button
-    if approved > 0 and pending == 0:
+    if approved > 0:
         st.markdown("---")
-        st.markdown(card("🏆 All pairs reviewed — Ready to build Golden Records"), unsafe_allow_html=True)
-        st.markdown(f'<p style="color:#9ca3af;font-size:13px;margin-bottom:16px;">{approved} approved pairs will be merged into golden records. Two tables will be created in your schema: <b style="color:#f9fafb">{st.session_state.sel_table}_GOLDEN</b> and <b style="color:#f9fafb">{st.session_state.sel_table}_MDM_AUDIT</b>.</p>', unsafe_allow_html=True)
+        st.markdown(card_open(f"🏆 {approved} cluster(s) approved — ready to build golden records"), unsafe_allow_html=True)
+        st.markdown(f'<p style="color:#8892b0;font-size:13px;margin-bottom:16px;">Creates <b style="color:#e8eaf0">{st.session_state.sel_table}_GOLDEN</b> and <b style="color:#e8eaf0">{st.session_state.sel_table}_MDM_AUDIT</b> in your schema.</p>', unsafe_allow_html=True)
         if st.button("🏆 Build Golden Records & Write to Snowflake →"):
             st.session_state.page="golden"; st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-    elif approved > 0:
-        st.markdown("---")
-        c1,c2 = st.columns(2)
-        with c1:
-            st.info(f"⏳ {pending} pairs still pending. Review all before building golden records, or:")
-        with c2:
-            st.markdown("<br>",unsafe_allow_html=True)
-            if st.button("🏆 Build Golden Records now (with approved so far) →"):
-                st.session_state.page="golden"; st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════
 # PAGE 6 — GOLDEN RECORD
 # ══════════════════════════════════════════════════════════════════════
 def page_golden():
-    topbar("Golden Record Builder", subtitle="Writing master records to Snowflake")
+    topbar("Golden Record Builder", subtitle="Merging approved clusters into master records")
     st.markdown("---")
 
     db,sc,tb  = st.session_state.sel_db,st.session_state.sel_schema,st.session_state.sel_table
-    cands     = st.session_state.candidates
+    clusters  = st.session_state.clusters
     decisions = st.session_state.decisions
-    approved  = [c for c in cands if decisions.get(c["pair_id"])=="APPROVED"]
-    schema_info = st.session_state.table_schema or {}
-    id_col    = schema_info.get("id_column", "ID")
+    approved  = [c for c in clusters if decisions.get(c["cluster_id"])=="APPROVED"]
+    id_col    = st.session_state.id_col or "ID"
 
-    st.markdown('<div style="background:#111827;border:1px solid #1f2937;border-radius:14px;padding:32px;">', unsafe_allow_html=True)
+    st.markdown('<div style="background:#0f1420;border:1px solid #1e2535;border-radius:14px;padding:32px;">', unsafe_allow_html=True)
     status = st.empty()
     bar    = st.progress(0)
-    detail = st.empty()
 
-    # Cluster approved pairs using union-find
-    status.markdown(step_msg("Step 1/3","Clustering approved pairs into unique customer groups..."))
-    bar.progress(15)
+    status.markdown(step_msg("1/3","Applying survivorship — picking best value per field..."))
+    bar.progress(20)
 
-    parent = {}
-    def find(x):
-        parent.setdefault(x,x)
-        if parent[x]!=x: parent[x]=find(parent[x])
-        return parent[x]
-    def union(x,y):
-        parent[find(x)]=find(y)
+    # Survivorship: longest/most complete value wins
+    def best_val(vals):
+        clean = [v for v in vals if v and str(v).strip() not in ("","None","nan","NULL")]
+        return max(clean, key=lambda x: len(str(x))) if clean else ""
 
-    all_recs_map = {}
-    for c in approved:
-        union(c["id_a"],c["id_b"])
-        all_recs_map[c["id_a"]] = c["rec_a"]
-        all_recs_map[c["id_b"]] = c["rec_b"]
-
-    clusters = defaultdict(list)
-    for cid in all_recs_map:
-        clusters[find(cid)].append(cid)
-
-    detail.markdown(f'<p style="color:#6b7280;font-family:DM Mono,monospace;font-size:12px;">✓ {len(approved)} approved pairs → {len(clusters)} unique customer clusters</p>', unsafe_allow_html=True)
-
-    # Survivorship — pick most complete value per field
-    def best_value(values):
-        clean = [v for v in values if v and str(v).strip() not in ("","None","nan","NULL")]
-        if not clean: return ""
-        return max(clean, key=lambda x: len(str(x)))
-
-    status.markdown(step_msg("Step 2/3","Applying survivorship rules — picking best value per field..."))
-    bar.progress(45)
-
-    cols = list(next(iter(all_recs_map.values())).keys()) if all_recs_map else []
+    all_cols    = list(approved[0]["records"][0].keys()) if approved else []
     golden_rows = []
-    for gid,(root,cids) in enumerate(clusters.items()):
-        recs   = [all_recs_map[c] for c in cids if c in all_recs_map]
+
+    for gid, cluster in enumerate(approved):
+        recs   = cluster["records"]
         golden = {}
-        for col in cols:
-            golden[col] = best_value([r.get(col,"") for r in recs])
+        for col in all_cols:
+            golden[col] = best_val([r.get(col,"") for r in recs])
         golden["GOLDEN_ID"]    = f"GLD{str(gid+1).zfill(5)}"
-        golden["SOURCE_IDS"]   = ", ".join(sorted(cids))
-        golden["MERGED_COUNT"] = len(cids)
+        golden["SOURCE_IDS"]   = ", ".join(str(r.get(id_col,"")) for r in recs)
+        golden["MERGED_COUNT"] = len(recs)
+        golden["MATCH_SCORE"]  = cluster["avg_score"]
+        golden["SIGNALS"]      = " | ".join(cluster["signals"][:5])
         golden["CREATED_AT"]   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         golden_rows.append(golden)
 
-    status.markdown(step_msg("Step 3/3","Writing golden records to Snowflake..."))
-    bar.progress(65)
+    bar.progress(50)
+    status.markdown(step_msg("2/3","Writing golden table to Snowflake..."))
 
     golden_tb = f"{tb}_GOLDEN"
     audit_tb  = f"{tb}_MDM_AUDIT"
     golden_df = pd.DataFrame(golden_rows)
 
     try:
-        # Create golden table dynamically — columns from actual data
-        col_defs = []
-        for col in golden_df.columns:
-            if col in ("MERGED_COUNT",):
-                col_defs.append(f'"{col}" NUMBER')
-            else:
-                col_defs.append(f'"{col}" VARCHAR')
+        col_defs = [f'"{c}" NUMBER' if c in ("MERGED_COUNT","MATCH_SCORE") else f'"{c}" VARCHAR'
+                    for c in golden_df.columns]
         sf_write(f'CREATE OR REPLACE TABLE "{db}"."{sc}"."{golden_tb}" ({", ".join(col_defs)})')
 
         for _,row in golden_df.iterrows():
-            vals = []
-            for v in row.values:
-                if v is None or str(v).strip()=="":
-                    vals.append("NULL")
-                else:
-                    vals.append(f"'{str(v).replace(chr(39),chr(39)*2)}'")
+            vals = ["NULL" if (v is None or str(v).strip() in ("","nan"))
+                    else f"'{str(v).replace(chr(39),chr(39)*2)}'"
+                    for v in row.values]
             sf_write(f'INSERT INTO "{db}"."{sc}"."{golden_tb}" VALUES ({", ".join(vals)})')
 
-        detail.markdown(f'<p style="color:#10b981;font-family:DM Mono,monospace;font-size:12px;">✓ Created {db}.{sc}.{golden_tb} with {len(golden_rows)} golden records</p>', unsafe_allow_html=True)
-
-        # Create audit table
         sf_write(f"""CREATE OR REPLACE TABLE "{db}"."{sc}"."{audit_tb}" (
-            PAIR_ID VARCHAR, ID_A VARCHAR, ID_B VARCHAR,
-            CONFIDENCE NUMBER, MATCHED_ON VARCHAR,
-            REASON VARCHAR, AGENT_DECISION VARCHAR,
-            HUMAN_DECISION VARCHAR, REVIEWED_AT VARCHAR
-        )""")
+            CLUSTER_ID VARCHAR, RECORD_IDS VARCHAR, RECORD_COUNT NUMBER,
+            MATCH_SCORE NUMBER, SIGNALS VARCHAR, HUMAN_DECISION VARCHAR, REVIEWED_AT VARCHAR)""")
 
-        for c in cands:
-            d = decisions.get(c["pair_id"],"PENDING")
+        for cluster in clusters:
+            d    = decisions.get(cluster["cluster_id"],"PENDING")
+            ids  = ", ".join(cluster["record_ids"])
+            sigs = " | ".join(cluster["signals"][:5]).replace("'","''")
             sf_write(f"""INSERT INTO "{db}"."{sc}"."{audit_tb}" VALUES (
-                '{c["pair_id"]}','{c["id_a"]}','{c["id_b"]}',
-                {c["confidence"]},
-                '{c["matched_on"].replace("'","''")}',
-                '{c["reason"].replace("'","''")}',
-                '{c["decision"]}','{d}',
-                '{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
-            )""")
+                '{cluster["cluster_id"]}','{ids}',{cluster["record_count"]},
+                {cluster["avg_score"]},'{sigs}','{d}',
+                '{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')""")
 
         bar.progress(100)
-        status.markdown(step_msg("✅ Done","Golden records and audit trail written to Snowflake!"))
+        status.markdown(step_msg("✅ Done","All records written to Snowflake!"))
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.success(f"✅ **{db}.{sc}.{golden_tb}** — {len(golden_rows)} golden master records")
-        st.success(f"✅ **{db}.{sc}.{audit_tb}** — full audit trail for all {len(cands)} pairs")
+        st.success(f"✅ **{db}.{sc}.{audit_tb}** — audit trail for all {len(clusters)} clusters")
 
-        st.markdown("### Preview — Golden Records")
+        st.markdown("### Preview")
         st.dataframe(golden_df, use_container_width=True, hide_index=True)
 
-        st.markdown("### Run these in Snowflake to verify")
+        st.markdown("### Verify in Snowflake")
         st.code(f"""-- Golden records
 SELECT * FROM "{db}"."{sc}"."{golden_tb}";
 
--- Audit trail
-SELECT * FROM "{db}"."{sc}"."{audit_tb}" ORDER BY CONFIDENCE DESC;
+-- Full audit trail
+SELECT * FROM "{db}"."{sc}"."{audit_tb}" ORDER BY MATCH_SCORE DESC;
 
 -- Summary
-SELECT HUMAN_DECISION, COUNT(*) as CNT
-FROM "{db}"."{sc}"."{audit_tb}"
-GROUP BY HUMAN_DECISION;""", language="sql")
+SELECT HUMAN_DECISION, COUNT(*), AVG(MATCH_SCORE)
+FROM "{db}"."{sc}"."{audit_tb}" GROUP BY 1;""", language="sql")
 
-        st.markdown("<br>", unsafe_allow_html=True)
         if st.button("← Back to Review"):
             st.session_state.page="hitl"; st.rerun()
 
     except Exception as e:
-        bar.progress(0)
         st.markdown("</div>", unsafe_allow_html=True)
         st.error(f"Error writing to Snowflake: {e}")
         if st.button("← Back"):
@@ -915,9 +1045,9 @@ pg = st.session_state.page
 if not st.session_state.sf_conn and pg != "login":
     st.session_state.page = "login"; pg = "login"
 
-if   pg=="login":  page_login()
-elif pg=="setup":  page_setup()
-elif pg=="table":  page_table()
-elif pg=="agent":  page_agent()
-elif pg=="hitl":   page_hitl()
-elif pg=="golden": page_golden()
+if   pg == "login":  page_login()
+elif pg == "setup":  page_setup()
+elif pg == "table":  page_table()
+elif pg == "agent":  page_agent()
+elif pg == "hitl":   page_hitl()
+elif pg == "golden": page_golden()
