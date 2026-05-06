@@ -81,11 +81,11 @@ def get_count():
     r = sf_query(f'SELECT COUNT(*) AS C FROM "{db}"."{sc}"."{tb}"')
     return int(r["C"].iloc[0])
 
-def gemini(prompt, max_tokens=4000):
+def gemini(prompt, max_tokens=20000):
     """Call Gemini and return text response."""
     genai.configure(api_key=st.session_state.gemini_key)
     model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash-preview-04-17",
+        model_name="gemini-2.5-flash-preview-05-20",
         generation_config=genai.GenerationConfig(
             max_output_tokens=max_tokens,
             temperature=0.1,
@@ -94,7 +94,7 @@ def gemini(prompt, max_tokens=4000):
     resp = model.generate_content(prompt)
     return resp.text.strip()
 
-def claude_json(prompt, max_tokens=4000):
+def claude_json(prompt, max_tokens=20000):
     """Call Gemini, expect JSON back, robust parsing."""
     text = gemini(prompt, max_tokens)
     text = re.sub(r"```json|```", "", text).strip()
@@ -164,7 +164,7 @@ For blocking_columns: pick 3-5 columns that would be most useful to group record
 
 Be smart — infer column meaning from the name AND the sample data, not just the column name."""
 
-    return claude_json(prompt, max_tokens=1500)
+    return claude_json(prompt, max_tokens=20000)
 
 # ══════════════════════════════════════════════════════════════════════
 # STEP B — Claude builds blocking groups
@@ -203,58 +203,61 @@ def build_candidate_pairs(all_records, schema_info):
 # ══════════════════════════════════════════════════════════════════════
 # STEP C — Claude scores each pair
 # ══════════════════════════════════════════════════════════════════════
-def score_pair(rec_a, rec_b, schema_info):
+def score_pairs_batch(pairs_data, schema_info):
     """
-    Give Claude both raw records + its own schema understanding.
-    Claude normalizes, compares, and decides — fully autonomous.
+    Score ALL pairs in ONE Gemini call to save API quota.
+    pairs_data: list of {"pair_index": i, "rec_a": {...}, "rec_b": {...}}
+    Returns list of results in same order.
     """
+    pairs_json = json.dumps(pairs_data, default=str, indent=2)
+    col_types  = json.dumps(schema_info.get("column_types", {}), indent=2)
+
     prompt = f"""You are a master data management expert.
 
-You previously analyzed this table and found these column types:
-{json.dumps(schema_info.get("column_types", {}), indent=2)}
+Table column types:
+{col_types}
 
-Now compare these two customer records and decide if they are the SAME real person.
+Score ALL of the following customer record pairs. For each pair decide if they are the SAME real person.
 
-Record A:
-{json.dumps(rec_a, default=str, indent=2)}
+Pairs to score:
+{pairs_json}
 
-Record B:
-{json.dumps(rec_b, default=str, indent=2)}
-
-Instructions:
-- You understand what each column means from the schema above
-- Normalize values yourself before comparing:
-  * Dates: treat "15-03-1990", "1990-03-15", "15031990", "March 15 1990" as identical
-  * Names: treat "M. Ali", "Mohd Ali", "Mohammed Ali" as the same
-  * Phones: ignore +91, spaces, dashes — compare last 10 digits
-  * Addresses: ignore case, punctuation, abbreviations (St vs Street, Rd vs Road)
+Rules for comparison:
+- Normalize before comparing:
+  * Dates: "15-03-1990", "1990-03-15", "15031990", "March 15 1990" = identical
+  * Names: "M. Ali", "Mohd Ali", "Mohammed Ali" = same person
+  * Phones: strip +91/spaces/dashes, compare last 10 digits
+  * Addresses: ignore case, punctuation, St=Street, Rd=Road
   * Email: case insensitive
-- Same numeric ID (CIF, account) = very strong duplicate signal
+- Same CIF/account number = very strong duplicate signal
 - Same email = very strong signal
 - Same phone = strong signal
 - Same IP = moderate signal
-- Name similarity alone = weak signal, needs other corroboration
-- Different city is NOT enough to say different person
+- Name similarity alone = weak, needs corroboration
+- Different city alone is NOT enough to call different person
 
-Return ONLY this JSON, nothing else:
-{{
-  "decision": "DUPLICATE" or "NOT_DUPLICATE" or "NEEDS_REVIEW",
-  "confidence": <0-100>,
-  "matched_on": "<which fields matched, comma separated>",
-  "reason": "<one clear sentence explaining the decision>",
-  "surviving_record": "A" or "B"
-}}
+Return ONLY a JSON array, one result per pair, in the same order:
+[
+  {{
+    "pair_index": <same number from input>,
+    "decision": "DUPLICATE" or "NOT_DUPLICATE" or "NEEDS_REVIEW",
+    "confidence": <0-100>,
+    "matched_on": "<comma separated field names that matched>",
+    "reason": "<one clear sentence>",
+    "surviving_record": "A" or "B"
+  }},
+  ...
+]
 
-surviving_record should be whichever record is more complete and accurate."""
+Return ONLY the JSON array. No explanation. No markdown."""
 
     try:
-        result = claude_json(prompt, max_tokens=400)
-        return result
+        results = claude_json(prompt, max_tokens=4000)
+        if isinstance(results, list):
+            return {r["pair_index"]: r for r in results}
+        return {}
     except Exception as e:
-        return {
-            "decision":"NEEDS_REVIEW","confidence":0,
-            "matched_on":"error","reason":str(e),"surviving_record":"A"
-        }
+        return {}
 
 # ══════════════════════════════════════════════════════════════════════
 # UI HELPERS
@@ -530,19 +533,29 @@ def page_agent():
         status.markdown(step_msg("Step 4/4",f"Claude scoring {len(pairs)} pairs — normalizing and comparing..."))
         candidates = []
 
+        # Build batch — all pairs in one list
+        pairs_data = []
         for i,(ia,ib) in enumerate(pairs):
-            pct = 40 + int((i/max(len(pairs),1))*58)
-            bar.progress(min(pct,98))
+            ra = all_recs[ia]
+            rb = all_recs[ib]
+            pairs_data.append({"pair_index": i, "rec_a": ra, "rec_b": rb})
 
+        detail.markdown(f'<p style="color:#6b7280;font-family:DM Mono,monospace;font-size:12px;">Sending all {len(pairs)} pairs to Gemini in one call...</p>', unsafe_allow_html=True)
+        bar.progress(70)
+
+        # ONE Gemini call for all pairs
+        results_map = score_pairs_batch(pairs_data, schema_info)
+        bar.progress(95)
+
+        for i,(ia,ib) in enumerate(pairs):
             ra = all_recs[ia]
             rb = all_recs[ib]
             id_a = str(ra.get(id_col, f"row_{ia}"))
             id_b = str(rb.get(id_col, f"row_{ib}"))
-
-            detail.markdown(f'<p style="color:#6b7280;font-family:DM Mono,monospace;font-size:12px;">Scoring {i+1}/{len(pairs)} · <span style="color:#3b82f6">{id_a}</span> vs <span style="color:#6366f1">{id_b}</span></p>', unsafe_allow_html=True)
-
-            result = score_pair(ra, rb, schema_info)
-
+            result = results_map.get(i, {
+                "decision":"NEEDS_REVIEW","confidence":0,
+                "matched_on":"not scored","reason":"No result returned","surviving_record":"A"
+            })
             if result.get("decision") in ("DUPLICATE","NEEDS_REVIEW"):
                 candidates.append({
                     "pair_id":    str(uuid.uuid4())[:8].upper(),
