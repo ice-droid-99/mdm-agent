@@ -85,7 +85,7 @@ def gemini(prompt, max_tokens=20000):
     """Call Gemini and return text response."""
     genai.configure(api_key=st.session_state.gemini_key)
     model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash-preview-05-20",
+        model_name="gemini-2.5-flash",
         generation_config=genai.GenerationConfig(
             max_output_tokens=max_tokens,
             temperature=0.1,
